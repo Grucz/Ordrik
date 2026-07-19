@@ -193,6 +193,7 @@
       <button id="zoomReset" aria-label="Återställ zoom">⤢</button>
     </div>
     <button class="btn ghost" id="infoBtn">Regler</button>
+    <button class="btn ghost" id="lobbyBtn">Mina spel</button>
   </div>
 
   <div class="rack" id="rack"></div>
@@ -215,6 +216,7 @@
 <div id="lobby" style="position:fixed;inset:0;z-index:9000;display:none;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:28px;text-align:center;background:#12100c;color:#eae0cf;font:500 16px/1.5 system-ui,-apple-system,sans-serif">
   <div style="font-size:30px;letter-spacing:1px;color:#c9a24b">Ordrik</div>
   <div id="lobbyMsg" style="min-height:1.4em;color:#c9a24b"></div>
+  <div id="savedGames" style="width:min(320px,80vw)"></div>
   <input id="nameInput" placeholder="Ditt namn" maxlength="16" style="width:min(320px,80vw);padding:12px 14px;border-radius:10px;border:1px solid #4a4130;background:#1c1810;color:#eae0cf;font-size:16px;text-align:center">
   <button class="btn primary" id="createBtn" style="width:min(320px,80vw)">Skapa nytt spel</button>
   <div style="display:flex;gap:8px;width:min(320px,80vw)">
@@ -242,6 +244,30 @@ const firebaseConfig = {
 let db = null;
 try { firebase.initializeApp(firebaseConfig); db = firebase.database(); }
 catch(e){ console.warn("Firebase kunde inte startas:", e); }
+
+/* --- Bestående identitet + mina pågående spel (sparas i webbläsaren) --- */
+const LS_ID="ordrik.playerId", LS_NAME="ordrik.playerName", LS_GAMES="ordrik.games";
+function myId(){
+  let id=null;
+  try{ id=localStorage.getItem(LS_ID); }catch(e){}
+  if(!id){
+    id="p"+Math.random().toString(36).slice(2,10)+Date.now().toString(36);
+    try{ localStorage.setItem(LS_ID,id); }catch(e){}
+  }
+  return id;
+}
+function savedName(){ try{ return localStorage.getItem(LS_NAME)||""; }catch(e){ return ""; } }
+function rememberName(n){ try{ localStorage.setItem(LS_NAME,n); }catch(e){} }
+function loadGames(){
+  try{ return JSON.parse(localStorage.getItem(LS_GAMES)||"[]"); }catch(e){ return []; }
+}
+function saveGames(list){ try{ localStorage.setItem(LS_GAMES,JSON.stringify(list)); }catch(e){} }
+function rememberGame(info){          // {code,seat,opponent,turn,updated}
+  const list=loadGames().filter(g=>g.code!==info.code);
+  list.unshift(Object.assign({updated:Date.now()},info));
+  saveGames(list.slice(0,20));
+}
+function forgetGame(code){ saveGames(loadGames().filter(g=>g.code!==code)); }
 
 let online = false;      // true när vi spelar via nätet
 let roomCode = null;     // rummets kod
@@ -895,10 +921,11 @@ function restartRoom(){
 }
 
 /* --------------------- Flerspelarsynk ------------------------------ */
+let seats = [null,null];   // spelaridentiteter per plats (för återanslutning)
 function serializeState(){
   stateSeq++;
   return JSON.stringify({
-    seq: stateSeq,
+    seq: stateSeq, seats,
     board, bag, current, consecutivePasses, gameOver, lastMove,
     players: players.map(p=>({name:p.name,score:p.score,rack:p.rack,streakSteps:p.streakSteps,stats:p.stats,_adj:p._adj||0}))
   });
@@ -915,9 +942,16 @@ function applyState(s){
   consecutivePasses = s.consecutivePasses || 0;
   gameOver = !!s.gameOver;
   players = s.players.map(p=>({name:p.name,score:p.score,rack:p.rack||[],streakSteps:p.streakSteps||0,stats:p.stats||newStats(),_adj:p._adj||0}));
+  if(s.seats) seats = s.seats;
   if(s.seq!==undefined) stateSeq = Math.max(stateSeq, s.seq);
   pending = []; selectedRack = null;
   if(wasOver && !gameOver) closeModal();   // motståndaren startade om
+  if(online && roomCode){
+    const opp=players[1-mySeat];
+    rememberGame({code:roomCode, seat:mySeat,
+      opponent:(opp&&opp.name)||"(väntar)",
+      turn:(current===mySeat), over:gameOver});
+  }
   renderAll(); updateShareBar();
   if(s.lastMove && s.lastMove.seq!==appliedMoveSeq){
     appliedMoveSeq = s.lastMove.seq;
@@ -963,43 +997,105 @@ function initFreshGame(names){
   pending=[]; selectedRack=null; current=0; consecutivePasses=0; wrongThisTurn=0; gameOver=false; shownGameOver=false; lastMove=null;
 }
 function startLocalGame(){
-  online=false; roomRef=null; roomCode=null; mySeat=0;
+  leaveRoom(); mySeat=0; seats=[null,null];
   document.getElementById("lobby").style.display="none";
   document.getElementById("shareBar").style.display="none";
   initFreshGame(["Spelare 1","Spelare 2"]);
   renderAll();
 }
+function readName(fallback){
+  const v=(document.getElementById("nameInput").value||"").trim().slice(0,16);
+  const n=v||savedName()||fallback;
+  rememberName(n);
+  return n;
+}
+function leaveRoom(){                 // koppla ner utan att radera spelet
+  if(roomRef) roomRef.child("state").off();
+  roomRef=null; online=false; roomCode=null;
+}
 function createRoom(){
   if(!db){ document.getElementById("lobbyMsg").textContent="Nätverket är inte tillgängligt just nu."; return; }
-  myName=(document.getElementById("nameInput").value||"Spelare 1").trim().slice(0,16)||"Spelare 1";
+  leaveRoom();
+  myName=readName("Spelare 1");
   online=true; mySeat=0; roomCode=randomCode(); roomRef=db.ref("rooms/"+roomCode); stateSeq=0; appliedMoveSeq=-1;
+  seats=[myId(),null];
   initFreshGame([myName,"(väntar)"]);
   document.getElementById("lobby").style.display="none";
+  rememberGame({code:roomCode,seat:0,opponent:"(väntar)",turn:true,over:false});
   pushState(); subscribeRoom();
   renderAll(); updateShareBar();
 }
-function joinRoom(){
-  if(!db){ document.getElementById("lobbyMsg").textContent="Nätverket är inte tillgängligt just nu."; return; }
-  const code=(document.getElementById("codeInput").value||"").trim().toUpperCase();
-  if(code.length!==4){ document.getElementById("lobbyMsg").textContent="Skriv koden — fyra bokstäver."; return; }
-  myName=(document.getElementById("nameInput").value||"Spelare 2").trim().slice(0,16)||"Spelare 2";
-  document.getElementById("lobbyMsg").textContent="Ansluter…";
+function enterRoom(code, msgEl){
+  // Ansluter till ett rum och tar tillbaka MIN plats om jag redan har en.
+  if(!db){ if(msgEl) msgEl.textContent="Nätverket är inte tillgängligt just nu."; return; }
+  const me=myId();
+  myName=readName("Spelare");
+  if(msgEl) msgEl.textContent="Ansluter…";
   const ref=db.ref("rooms/"+code);
   ref.child("state").get().then(snap=>{
     const raw=snap.val();
-    if(!raw){ document.getElementById("lobbyMsg").textContent="Hittade inget spel med koden "+code+"."; return; }
-    online=true; mySeat=1; roomCode=code; roomRef=ref;
+    if(!raw){
+      if(msgEl) msgEl.textContent="Hittade inget spel med koden "+code+".";
+      forgetGame(code); renderSavedGames();
+      return;
+    }
     const s=JSON.parse(raw);
-    s.players[1].name=myName;
+    const st=s.seats||[null,null];
+    let seat;
+    if(st[0]===me) seat=0;                 // jag är skaparen som kommer tillbaka
+    else if(st[1]===me) seat=1;            // jag är motspelaren som kommer tillbaka
+    else if(!st[1]) seat=1;                // ledig plats: gå med som motspelare
+    else if(!st[0]) seat=0;
+    else { if(msgEl) msgEl.textContent="Rummet är fullt."; return; }
+
+    leaveRoom();
+    online=true; mySeat=seat; roomCode=code; roomRef=ref; appliedMoveSeq=-1;
+    st[seat]=me; s.seats=st;
+    s.players[seat].name=myName;           // uppdatera mitt namn
     applyState(s);
     document.getElementById("lobby").style.display="none";
-    pushState();          // skriv tillbaka mitt namn
+    pushState();                            // skriv tillbaka plats + namn
     subscribeRoom();
-  }).catch(e=>{ document.getElementById("lobbyMsg").textContent="Kunde inte ansluta: "+e.message; });
+  }).catch(e=>{ if(msgEl) msgEl.textContent="Kunde inte ansluta: "+e.message; });
+}
+function joinRoom(){
+  const msg=document.getElementById("lobbyMsg");
+  const code=(document.getElementById("codeInput").value||"").trim().toUpperCase();
+  if(code.length!==4){ msg.textContent="Skriv koden — fyra bokstäver."; return; }
+  enterRoom(code, msg);
+}
+function renderSavedGames(){
+  const box=document.getElementById("savedGames");
+  const list=loadGames();
+  if(!list.length){ box.innerHTML=""; return; }
+  box.innerHTML=`<div style="font-size:13px;color:#8a7a52;text-align:left;margin-bottom:6px">Mina spel</div>`+
+    list.map(g=>{
+      const status = g.over ? "avslutat" : (g.turn ? "din tur" : "väntar på motspelaren");
+      const col = g.over ? "#8a7a52" : (g.turn ? "#c9a24b" : "#8a7a52");
+      return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <button class="btn ghost gopen" data-code="${g.code}" style="flex:1;text-align:left;padding:10px 12px">
+          <b style="letter-spacing:2px">${g.code}</b>
+          <span style="font-size:13px;color:#8a7a52"> · mot ${g.opponent}</span>
+          <span style="font-size:13px;color:${col}"> · ${status}</span>
+        </button>
+        <button class="btn ghost gdel" data-code="${g.code}" title="Ta bort ur listan" style="padding:10px 12px">×</button>
+      </div>`;
+    }).join("");
+  box.querySelectorAll(".gopen").forEach(b=>{
+    b.onclick=()=>enterRoom(b.dataset.code, document.getElementById("lobbyMsg"));
+  });
+  box.querySelectorAll(".gdel").forEach(b=>{
+    b.onclick=()=>{ forgetGame(b.dataset.code); renderSavedGames(); };
+  });
 }
 function showLobby(){
+  leaveRoom();
+  document.getElementById("shareBar").style.display="none";
   const lob=document.getElementById("lobby");
   lob.style.display="flex";
+  document.getElementById("lobbyMsg").textContent="";
+  document.getElementById("nameInput").value=savedName();
+  renderSavedGames();
   document.getElementById("createBtn").onclick=createRoom;
   document.getElementById("joinBtn").onclick=joinRoom;
   document.getElementById("localBtn").onclick=startLocalGame;
@@ -1011,6 +1107,7 @@ document.getElementById("recallBtn").onclick=()=>{ if(canAct()) recallAll(); };
 document.getElementById("swapBtn").onclick=swapTiles;
 document.getElementById("passBtn").onclick=passTurn;
 document.getElementById("infoBtn").onclick=openInfo;
+document.getElementById("lobbyBtn").onclick=()=>{ closeModal(); showLobby(); };
 
 (function boot(){
   const L = document.createElement("div");
