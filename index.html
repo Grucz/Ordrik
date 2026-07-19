@@ -130,11 +130,12 @@
   .rtile{
     width:46px;height:50px;border-radius:8px;
     background:linear-gradient(180deg,var(--tile),#ece1c6);border:1px solid var(--tile-edge);
-    color:var(--tile-ink);position:relative;cursor:pointer;
+    color:var(--tile-ink);position:relative;cursor:grab;touch-action:none;
     display:flex;align-items:center;justify-content:center;font-weight:800;font-size:24px;
     box-shadow:0 3px 6px -3px rgba(0,0,0,.6), inset 0 1px 0 #fffdf5;transition:transform .1s;
   }
   .rtile:active{transform:translateY(1px)}
+  .rtile.drag{cursor:grabbing;opacity:.6;transform:scale(1.08);box-shadow:0 10px 18px -6px rgba(0,0,0,.7)}
   .rtile.sel{outline:2px solid var(--brass);outline-offset:2px;transform:translateY(-4px)}
   .rtile .val{position:absolute;right:4px;bottom:2px;font-size:11px;color:#8a7a52;font-weight:700}
   .rtile.blank{color:#b98a2e}
@@ -164,6 +165,35 @@
   .modal .grid button:active{filter:brightness(.95)}
   .modal .close{margin-top:14px;width:100%}
   .final-row{display:flex;justify-content:space-between;padding:8px 2px;border-bottom:1px solid #2a3c66;font-size:15px}
+
+  /* Sidospalten finns bara som gruppering i liggande läge. I stående löses den
+     upp (display:contents) och ordningen sätts explicit så allt hamnar som förr. */
+  .side{display:contents}
+  header{order:0} .scores{order:1} .flash{order:2} #shareBar{order:3}
+  .board-wrap{order:4} .controls{order:5}
+
+  /* --- Liggande läge (och låga fönster): brädet vid sidan av kontrollerna --- *
+   * I stående läge äter rubrik, poäng och brickställ höjd från brädet. Vänder
+   * man mobilen finns i stället gott om BREDD, så då lägger vi brädet till
+   * vänster i full höjd och alla kontroller i en egen spalt till höger.      */
+  @media (orientation:landscape) and (max-height:560px){
+    body{flex-direction:row;align-items:stretch}
+    header{display:none}
+    #shareBar{display:none !important}
+    .board-wrap{flex:1;padding:6px;align-items:center;min-width:0;order:0}
+    .side{
+      order:1;display:flex;flex-direction:column;justify-content:center;
+      width:min(300px,42vw);gap:6px;padding:8px 10px;border-left:1px solid #24345c;overflow-y:auto
+    }
+    .scores{margin:0 auto 2px;padding:0;max-width:none}
+    .score .name{font-size:11px}
+    .score .pts{font-size:20px}
+    .controls{border-top:0;padding:0;background:transparent}
+    .toolbar{margin-bottom:6px}
+    .rack{margin-bottom:8px;min-height:0}
+    .hint{display:none}
+    .bagline{font-size:11px;margin-top:4px}
+  }
   .final-row.win{color:var(--brass-soft);font-weight:700}
   .legend{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px;font-size:12px;color:var(--muted)}
   .legend span{display:inline-flex;align-items:center;gap:5px}
@@ -176,13 +206,14 @@
   <div class="tagline">lägg ord · belöna långa och ovanliga · chansa försiktigt</div>
 </header>
 
-<div class="scores" id="scores"></div>
-<div class="flash"><div class="flash-inner" id="flash"></div></div>
-<div id="shareBar" style="display:none;margin:0 auto 8px;max-width:520px;padding:8px 12px;border-radius:10px;background:#1c1810;border:1px solid #4a4130;color:#c9a24b;text-align:center;font-size:14px"></div>
-
 <div class="board-wrap" id="boardWrap">
   <div class="board" id="board"></div>
 </div>
+
+<div class="side">
+<div class="scores" id="scores"></div>
+<div class="flash"><div class="flash-inner" id="flash"></div></div>
+<div id="shareBar" style="display:none;margin:0 auto 8px;max-width:520px;padding:8px 12px;border-radius:10px;background:#1c1810;border:1px solid #4a4130;color:#c9a24b;text-align:center;font-size:14px"></div>
 
 <div class="controls">
   <div class="toolbar">
@@ -192,6 +223,7 @@
       <button id="zoomIn" aria-label="Zooma in">+</button>
       <button id="zoomReset" aria-label="Återställ zoom">⤢</button>
     </div>
+    <button class="btn ghost" id="shuffleBtn" title="Blanda brickorna">Blanda</button>
     <button class="btn ghost" id="infoBtn">Regler</button>
     <button class="btn ghost" id="lobbyBtn">Mina spel</button>
   </div>
@@ -206,6 +238,7 @@
   </div>
   <div class="bagline">Kvar i påsen: <b id="bagCount">0</b> · brickor · <span id="turnNote"></span></div>
 </div>
+</div><!-- /side -->
 
 <!-- Overlay -->
 <div class="overlay" id="overlay">
@@ -489,20 +522,73 @@ function tileNode(t,isPending){
 }
 
 const rackEl=document.getElementById("rack");
+/* Brickstället: tryck = välj bricka, dra = flytta den i stället.
+   Ordningen är bara till för ögat och påverkar inga regler — den går att
+   ändra även medan man väntar på motspelaren. */
+let dragIdx=null, dragMoved=false, dragFrom=null;
+function myRack(){ return players[online?mySeat:current].rack; }
+
 function renderRack(){
   rackEl.innerHTML="";
-  const p=players[online?mySeat:current];
-  p.rack.forEach((t,i)=>{
+  myRack().forEach((t,i)=>{
     const d=document.createElement("div");
-    d.className="rtile"+(t.blank?" blank":"")+(selectedRack===i?" sel":"");
+    d.className="rtile"+(t.blank?" blank":"")+(selectedRack===i?" sel":"")+(dragIdx===i?" drag":"");
     const ch=document.createElement("span");
     ch.textContent = t.blank ? "★" : t.letter;
     d.appendChild(ch);
     const v=document.createElement("span"); v.className="val"; v.textContent=t.value;
     d.appendChild(v);
-    d.addEventListener("click",()=>{ if(!canAct()) return; selectedRack = (selectedRack===i?null:i); renderRack(); });
+    d.addEventListener("pointerdown",e=>startRackDrag(e,i));
     rackEl.appendChild(d);
   });
+}
+
+function rackIndexAt(x,y){          // brickan närmast pekaren (klarar radbrytning)
+  let best=null, bd=Infinity;
+  [...rackEl.children].forEach((k,i)=>{
+    const r=k.getBoundingClientRect();
+    const dx=x-(r.left+r.width/2), dy=y-(r.top+r.height/2);
+    const d=dx*dx+dy*dy;
+    if(d<bd){ bd=d; best=i; }
+  });
+  return best;
+}
+
+function startRackDrag(e,i){
+  dragIdx=i; dragMoved=false; dragFrom={x:e.clientX,y:e.clientY};
+  const move=ev=>{
+    if(dragIdx===null) return;
+    if(!dragMoved){
+      // liten rörelse räknas fortfarande som ett tryck
+      if(Math.abs(ev.clientX-dragFrom.x)<8 && Math.abs(ev.clientY-dragFrom.y)<8) return;
+      dragMoved=true; selectedRack=null; renderRack();
+    }
+    ev.preventDefault();
+    const to=rackIndexAt(ev.clientX,ev.clientY);
+    if(to!==null && to!==dragIdx){
+      const rack=myRack();
+      rack.splice(to,0,rack.splice(dragIdx,1)[0]);
+      dragIdx=to; renderRack();
+    }
+  };
+  const up=()=>{
+    document.removeEventListener("pointermove",move);
+    document.removeEventListener("pointerup",up);
+    document.removeEventListener("pointercancel",up);
+    const wasDrag=dragMoved, idx=dragIdx;
+    dragIdx=null; dragMoved=false;
+    if(!wasDrag && canAct()) selectedRack = (selectedRack===idx ? null : idx);
+    renderRack();
+  };
+  document.addEventListener("pointermove",move,{passive:false});
+  document.addEventListener("pointerup",up);
+  document.addEventListener("pointercancel",up);
+}
+
+function shuffleRack(){
+  const rack=myRack();
+  for(let i=rack.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [rack[i],rack[j]]=[rack[j],rack[i]]; }
+  selectedRack=null; renderRack();
 }
 
 function renderScores(){
@@ -810,13 +896,33 @@ function flashPlain(msg){ showFlash(`<span class="chip">${msg}</span>`); }
 const BASE_CELL=22;
 const ZOOMS=[0.75,1,1.25,1.5,2];
 function applyZoom(){ boardEl.style.setProperty("--cell",(BASE_CELL*zoom)+"px"); document.getElementById("zoomLvl").textContent=Math.round(zoom*100)+"%"; }
+
+/* Anpassa: räkna ut största brickstorlek där HELA brädet ryms i den yta
+   som finns kvar mellan poängraden och brickstället. Rutnätet är
+   15 celler + 14 mellanrum (2px) + brädets kantpadding (6px per sida). */
+function fitZoom(){
+  const wrap=document.getElementById("boardWrap");
+  const availW=wrap.clientWidth  - 24;   // wrapens padding
+  const availH=wrap.clientHeight - 24;
+  const avail=Math.min(availW,availH);
+  if(avail<=0) return;
+  const cell=(avail - (14*2 + 12)) / 15;
+  zoom=Math.max(0.4, Math.min(2.5, cell/BASE_CELL));
+  applyZoom();
+}
+let fitTimer=null;
+function scheduleFit(){ clearTimeout(fitTimer); fitTimer=setTimeout(fitZoom,120); }
+window.addEventListener("resize", scheduleFit);
+window.addEventListener("orientationchange", ()=>setTimeout(fitZoom,300));
 function stepZoom(dir){
-  let i=ZOOMS.indexOf(zoom); if(i<0)i=1;
+  // utgå från det steg som ligger närmast nuvarande (kan vara ett anpassat värde)
+  let i=0, best=Infinity;
+  ZOOMS.forEach((z,n)=>{ const d=Math.abs(z-zoom); if(d<best){best=d;i=n;} });
   i=Math.max(0,Math.min(ZOOMS.length-1,i+dir)); zoom=ZOOMS[i]; applyZoom();
 }
 document.getElementById("zoomIn").onclick=()=>stepZoom(1);
 document.getElementById("zoomOut").onclick=()=>stepZoom(-1);
-document.getElementById("zoomReset").onclick=()=>{zoom=1;applyZoom();};
+document.getElementById("zoomReset").onclick=fitZoom;
 
 /* --------------------------- Modaler ------------------------------- */
 const overlay=document.getElementById("overlay"), modal=document.getElementById("modal");
@@ -934,14 +1040,27 @@ function pushState(){
   if(!online || !roomRef) return;
   roomRef.child("state").set(serializeState());
 }
+/* Behåll MIN egen brickordning när ett nytt spelläge kommer från molnet —
+   annars skulle motspelarens drag kasta om brickorna jag nyss sorterat. */
+function keepMyRackOrder(prev, next){
+  if(!prev || !prev.length) return next;
+  const pool=next.slice(), out=[];
+  prev.forEach(t=>{
+    const i=pool.findIndex(u=>u.letter===t.letter && u.value===t.value && !!u.blank===!!t.blank);
+    if(i>=0) out.push(pool.splice(i,1)[0]);
+  });
+  return out.concat(pool);           // nya brickor läggs sist
+}
 function applyState(s){
   const wasOver = gameOver;
+  const prevMine = (online && players[mySeat]) ? players[mySeat].rack.slice() : null;
   board = s.board;
   bag = s.bag || [];
   current = s.current || 0;
   consecutivePasses = s.consecutivePasses || 0;
   gameOver = !!s.gameOver;
   players = s.players.map(p=>({name:p.name,score:p.score,rack:p.rack||[],streakSteps:p.streakSteps||0,stats:p.stats||newStats(),_adj:p._adj||0}));
+  if(prevMine && players[mySeat]) players[mySeat].rack = keepMyRackOrder(prevMine, players[mySeat].rack);
   if(s.seats) seats = s.seats;
   if(s.seq!==undefined) stateSeq = Math.max(stateSeq, s.seq);
   pending = []; selectedRack = null;
@@ -1001,7 +1120,7 @@ function startLocalGame(){
   document.getElementById("lobby").style.display="none";
   document.getElementById("shareBar").style.display="none";
   initFreshGame(["Spelare 1","Spelare 2"]);
-  renderAll();
+  renderAll(); setTimeout(fitZoom,50);
 }
 function readName(fallback){
   const v=(document.getElementById("nameInput").value||"").trim().slice(0,16);
@@ -1023,7 +1142,7 @@ function createRoom(){
   document.getElementById("lobby").style.display="none";
   rememberGame({code:roomCode,seat:0,opponent:"(väntar)",turn:true,over:false});
   pushState(); subscribeRoom();
-  renderAll(); updateShareBar();
+  renderAll(); updateShareBar(); setTimeout(fitZoom,50);
 }
 function enterRoom(code, msgEl){
   // Ansluter till ett rum och tar tillbaka MIN plats om jag redan har en.
@@ -1054,6 +1173,7 @@ function enterRoom(code, msgEl){
     s.players[seat].name=myName;           // uppdatera mitt namn
     applyState(s);
     document.getElementById("lobby").style.display="none";
+    setTimeout(fitZoom,50);
     pushState();                            // skriv tillbaka plats + namn
     subscribeRoom();
   }).catch(e=>{ if(msgEl) msgEl.textContent="Kunde inte ansluta: "+e.message; });
@@ -1107,6 +1227,7 @@ document.getElementById("recallBtn").onclick=()=>{ if(canAct()) recallAll(); };
 document.getElementById("swapBtn").onclick=swapTiles;
 document.getElementById("passBtn").onclick=passTurn;
 document.getElementById("infoBtn").onclick=openInfo;
+document.getElementById("shuffleBtn").onclick=shuffleRack;
 document.getElementById("lobbyBtn").onclick=()=>{ closeModal(); showLobby(); };
 
 (function boot(){
